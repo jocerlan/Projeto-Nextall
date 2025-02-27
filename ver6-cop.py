@@ -334,18 +334,19 @@ def upload_file():
         if pd.notna(row['Responsável']):
             # Para responsável principal, mantemos o nome completo
             tech = normalize_technician_name(str(row['Responsável']))
-            if tech and tech not in processed_techs:
-                if tech not in technician_data:
-                    technician_data[tech] = {
-                        "Técnico": tech,
+            matching_tech = find_matching_technician(tech, technician_data)
+            if matching_tech and matching_tech not in processed_techs:
+                if matching_tech not in technician_data:
+                    technician_data[matching_tech] = {
+                        "Técnico": matching_tech,
                         "Quantidade de OS": 0,
                         "Valor Total": 0,
                         "Motivos": Counter()
                     }
-                technician_data[tech]["Quantidade de OS"] += 1
-                technician_data[tech]["Valor Total"] += 3  # Add 3 reais per OS
-                technician_data[tech]["Motivos"][motivo] += 1
-                processed_techs.add(tech)
+                technician_data[matching_tech]["Quantidade de OS"] += 1
+                technician_data[matching_tech]["Valor Total"] += 3  # Add 3 reais per OS
+                technician_data[matching_tech]["Motivos"][motivo] += 1
+                processed_techs.add(matching_tech)
         
         # Processar técnicos auxiliares (apenas primeiro nome)
         if pd.notna(row['Técnico(s) auxiliar(s)']):
