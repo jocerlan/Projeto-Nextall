@@ -1,12 +1,29 @@
 import pandas as pd
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, redirect, url_for
 import os
 from collections import Counter
 import re
+import sqlite3
+from datetime import datetime
+import json
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def init_db():
+    conn = sqlite3.connect('reports.db')
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TIMESTAMP NOT NULL,
+            filename TEXT NOT NULL,
+            data JSON NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 html_template = """
 <!DOCTYPE html>
@@ -153,7 +170,7 @@ html_template = """
 
         .value-highlight {
             font-weight: bold;
-            color: var(--dark-orange);
+            color: var (--dark-orange);
         }
 
         .contract-btn {
@@ -167,12 +184,12 @@ html_template = """
         }
 
         .contract-btn:hover {
-            background-color: var(--dark-orange);
+            background-color: var (--dark-orange);
         }
 
-        .contracts-list {
-            margin-top: 8px;
-            padding: 8px;
+        .contracts-panel {
+            margin-top: 5px;
+            padding: 5px;
             background-color: var(--light-orange);
             border-radius: 4px;
         }
@@ -190,6 +207,9 @@ html_template = """
                 <label for="file-input" class="file-label">Escolher arquivo Excel</label>
                 <button type="submit">Processar arquivo</button>
             </form>
+            <div style="margin-top: 20px">
+                <a href="{{ url_for('reports') }}" class="file-label">Ver Relatórios Salvos</a>
+            </div>
         </div>
 
         {% if summary_data %}
@@ -224,12 +244,16 @@ html_template = """
                                     <td>{{ motivo["Quantidade"] }}</td>
                                     <td>{{ motivo["Porcentagem"] }}%</td>
                                     <td>
-                                        <button class="contract-btn" onclick="toggleContracts(this)">Ver Contratos</button>
-                                        <div class="contracts-list" style="display: none;">
-                                            {% for contrato in motivo["Contratos"] %}
-                                                <div>{{ contrato }}</div>
-                                            {% endfor %}
+                                        {% if motivo["Contratos"] %}
+                                        <button class="contract-btn" onclick="toggleContracts(this)">
+                                            Ver Contratos ({{ motivo["Contratos"]|length }})
+                                        </button>
+                                        <div class="contracts-panel" style="display: none;">
+                                            {{ motivo["Contratos"]|join(", ") }}
                                         </div>
+                                        {% else %}
+                                        Sem contratos
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% endfor %}
@@ -264,18 +288,90 @@ html_template = """
             });
         }
 
-        // Toggle contracts list
+        // Toggle contracts panel
         function toggleContracts(button) {
-            const contractsList = button.nextElementSibling;
-            if (contractsList.style.display === "none") {
-                contractsList.style.display = "block";
+            const panel = button.nextElementSibling;
+            if (panel.style.display === "none") {
+                panel.style.display = "block";
                 button.textContent = "Ocultar Contratos";
             } else {
-                contractsList.style.display = "none";
-                button.textContent = "Ver Contratos";
+                panel.style.display = "none";
+                button.textContent = "Ver Contratos (" + panel.textContent.split(",").length + ")";
             }
         }
     </script>
+</body>
+</html>
+"""
+
+reports_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Relatórios Salvos - Nordeste Solar</title>
+    <style>
+        /* Copy existing styles from html_template */
+        /* Add new styles: */
+        .reports-list {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .report-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid var(--light-orange);
+        }
+        .report-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .delete-btn {
+            background-color: #ff4444;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .delete-btn:hover {
+            background-color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Relatórios Salvos - Nordeste Solar</h2>
+        </div>
+        <div class="reports-list">
+            {% if reports %}
+                {% for report in reports %}
+                    <div class="report-item">
+                        <div>
+                            <strong>{{ report.filename }}</strong>
+                            <br>
+                            <small>Data: {{ report.date }}</small>
+                        </div>
+                        <div class="report-actions">
+                            <a href="{{ url_for('view_report', report_id=report.id) }}" class="file-label">Ver Relatório</a>
+                            <form action="{{ url_for('delete_report', report_id=report.id) }}" method="post" style="display: inline;">
+                                <button type="submit" class="delete-btn" onclick="return confirm('Tem certeza que deseja excluir este relatório?')">Excluir</button>
+                            </form>
+                        </div>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p>Nenhum relatório encontrado.</p>
+            {% endif %}
+        </div>
+        <div style="margin-top: 20px">
+            <a href="{{ url_for('home') }}" class="file-label">Voltar para Upload</a>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -284,16 +380,29 @@ html_template = """
 def home():
     return render_template_string(html_template)
 
+def get_first_name(full_name):
+    """
+    Extrai o primeiro nome de um nome completo
+    """
+    if not isinstance(full_name, str):
+        return ""
+    return full_name.split()[0].lower().strip() if full_name.split() else ""
+
+def get_all_name_parts(full_name):
+    """
+    Retorna todas as partes do nome como uma lista
+    """
+    if not isinstance(full_name, str):
+        return []
+    return [part.lower().strip() for part in full_name.split()]
+
 def normalize_technician_name(name):
     """
     Normaliza o nome de um técnico para facilitar a comparação e evitar duplicidades.
     """
     if not isinstance(name, str):
         return ""
-    
-    # Remover espaços extras, converter para minúsculas
-    normalized = name.strip().lower()
-    return normalized
+    return name.strip().lower()
 
 def extract_first_names(technician_str):
     """
@@ -318,28 +427,6 @@ def extract_first_names(technician_str):
     # Remover duplicatas
     return list(dict.fromkeys(names))
 
-def find_matching_technician(tech_name, technician_data):
-    """
-    Procura por um técnico existente que corresponda ao nome fornecido
-    """
-    full_name, first_name = normalize_technician_name(tech_name), tech_name.split()[0].lower()
-    
-    if not first_name:
-        return None
-        
-    # Primeiro procura por correspondência exata
-    if (full_name in technician_data):
-        return full_name
-        
-    # Procura por correspondência no primeiro nome ou sobrenome
-    for existing_tech in technician_data.keys():
-        existing_full, existing_first = normalize_technician_name(existing_tech), existing_tech.split()[0].lower()
-        if first_name == existing_first or first_name in existing_full.split():
-            return existing_tech
-            
-    # Se não encontrou, retorna o nome completo original
-    return full_name
-
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
@@ -361,67 +448,87 @@ def upload_file():
     # Remover os tipos de OS "Financeiro" e "Entrega de Carnê"
     df_cleaned = df_cleaned[~df_cleaned['Motivo'].isin(['Financeiro', 'Entrega de Carnê'])]
     
+    # Dicionário para mapear primeiros nomes aos nomes completos
+    name_mapping = {}
+    tech_full_names = set()
+
+    # Primeiro passo: coletar todos os nomes completos dos responsáveis
+    for index, row in df_cleaned.iterrows():
+        if pd.notna(row['Responsável']):
+            full_name = normalize_technician_name(str(row['Responsável']))
+            first_name = get_first_name(full_name)
+            name_parts = get_all_name_parts(full_name)
+            
+            for part in name_parts:
+                name_mapping[part] = full_name
+            tech_full_names.add(full_name)
+
     # Usar um dicionário para armazenar os dados de cada técnico
     technician_data = {}
-    
-    # Lista para rastrear técnicos já contabilizados em cada OS
     processed_techs = set()
-    
+
     # Processar cada linha do DataFrame
     for index, row in df_cleaned.iterrows():
         motivo = row['Motivo'] if pd.notna(row['Motivo']) else "Não especificado"
-        contract_id = str(row['ID Contrato']) if pd.notna(row['ID Contrato']) else "N/A"
-        processed_techs.clear()  # Limpar o conjunto para cada nova OS
-        
-        # Processar responsáveis
+        processed_techs.clear()
+
+        # Processar responsável
         if pd.notna(row['Responsável']):
-            # Para responsável principal, mantemos o nome completo
             tech = normalize_technician_name(str(row['Responsável']))
-            matching_tech = find_matching_technician(tech, technician_data)
-            if matching_tech and matching_tech not in processed_techs:
-                if matching_tech not in technician_data:
-                    technician_data[matching_tech] = {
-                        "Técnico": matching_tech,
+            if tech and tech not in processed_techs:
+                if tech not in technician_data:
+                    technician_data[tech] = {
+                        "Técnico": tech,
                         "Quantidade de OS": 0,
                         "Valor Total": 0,
                         "Motivos": Counter(),
-                        "Contratos": {}  # New structure to store contract IDs by motivo
+                        "Contratos": {}  # Add this line
                     }
-                technician_data[matching_tech]["Quantidade de OS"] += 1
-                technician_data[matching_tech]["Valor Total"] += 3  # Add 3 reais per OS
-                technician_data[matching_tech]["Motivos"][motivo] += 1
-                
-                # Store contract IDs for each motivo
-                if motivo not in technician_data[matching_tech]["Contratos"]:
-                    technician_data[matching_tech]["Contratos"][motivo] = []
-                technician_data[matching_tech]["Contratos"][motivo].append(contract_id)
-                
-                processed_techs.add(matching_tech)
-        
-        # Processar técnicos auxiliares (apenas primeiro nome)
+                technician_data[tech]["Quantidade de OS"] += 1
+                technician_data[tech]["Valor Total"] += 3
+                technician_data[tech]["Motivos"][motivo] += 1
+                processed_techs.add(tech)
+
+                # When processing each row, add the contract ID:
+                if pd.notna(row['ID Contrato']):
+                    if motivo not in technician_data[tech]["Contratos"]:
+                        technician_data[tech]["Contratos"][motivo] = []
+                    technician_data[tech]["Contratos"][motivo].append(str(row['ID Contrato']))
+
+        # Processar técnicos auxiliares
         if pd.notna(row['Técnico(s) auxiliar(s)']):
-            for aux_tech in extract_first_names(str(row['Técnico(s) auxiliar(s)'])):
-                matching_tech = find_matching_technician(aux_tech, technician_data)
-                if matching_tech and matching_tech not in processed_techs:
-                    if matching_tech not in technician_data:
-                        technician_data[matching_tech] = {
-                            "Técnico": matching_tech,
+            aux_techs = extract_first_names(str(row['Técnico(s) auxiliar(s)']))
+            for aux_tech in aux_techs:
+                # Verificar se o primeiro nome corresponde a algum técnico conhecido
+                matched_full_name = name_mapping.get(aux_tech)
+                
+                if matched_full_name and matched_full_name not in processed_techs:
+                    # Usar o nome completo correspondente
+                    tech = matched_full_name
+                elif aux_tech not in processed_techs:
+                    # Usar apenas o primeiro nome se não houver correspondência
+                    tech = aux_tech
+
+                if tech not in processed_techs:
+                    if tech not in technician_data:
+                        technician_data[tech] = {
+                            "Técnico": tech,
                             "Quantidade de OS": 0,
                             "Valor Total": 0,
                             "Motivos": Counter(),
-                            "Contratos": {}  # New structure to store contract IDs by motivo
+                            "Contratos": {}  # Add this line
                         }
-                    technician_data[matching_tech]["Quantidade de OS"] += 1
-                    technician_data[matching_tech]["Valor Total"] += 3  # Add 3 reais per OS
-                    technician_data[matching_tech]["Motivos"][motivo] += 1
-                    
-                    # Store contract IDs for each motivo
-                    if motivo not in technician_data[matching_tech]["Contratos"]:
-                        technician_data[matching_tech]["Contratos"][motivo] = []
-                    technician_data[matching_tech]["Contratos"][motivo].append(contract_id)
-                    
-                    processed_techs.add(matching_tech)
-    
+                    technician_data[tech]["Quantidade de OS"] += 1
+                    technician_data[tech]["Valor Total"] += 3
+                    technician_data[tech]["Motivos"][motivo] += 1
+                    processed_techs.add(tech)
+
+                    # When processing each row, add the contract ID:
+                    if pd.notna(row['ID Contrato']):
+                        if motivo not in technician_data[tech]["Contratos"]:
+                            technician_data[tech]["Contratos"][motivo] = []
+                        technician_data[tech]["Contratos"][motivo].append(str(row['ID Contrato']))
+
     # Verificar se temos dados para processar
     if not technician_data:
         return "Nenhum técnico encontrado nos dados", 400
@@ -435,7 +542,7 @@ def upload_file():
                 "Motivo": motivo,
                 "Quantidade": quantidade,
                 "Porcentagem": round((quantidade / total_os) * 100, 1),
-                "Contratos": tech_info["Contratos"].get(motivo, [])  # Add contract IDs
+                "Contratos": tech_info["Contratos"].get(motivo, [])  # Add this line
             }
             for motivo, quantidade in tech_info["Motivos"].items()
         ]
@@ -448,7 +555,57 @@ def upload_file():
     
     summary_data.sort(key=lambda x: x["Quantidade de OS"], reverse=True)
     
+    # Save report to database
+    conn = sqlite3.connect('reports.db')
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO reports (date, filename, data)
+        VALUES (?, ?, ?)
+    ''', (
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        file.filename,
+        json.dumps(summary_data)
+    ))
+    conn.commit()
+    conn.close()
+    
     return render_template_string(html_template, summary_data=summary_data)
 
+# Add these new routes
+
+@app.route('/reports')
+def reports():
+    conn = sqlite3.connect('reports.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM reports ORDER BY date DESC')
+    reports = c.fetchall()
+    conn.close()
+    return render_template_string(reports_template, reports=reports)
+
+@app.route('/report/<int:report_id>')
+def view_report(report_id):
+    conn = sqlite3.connect('reports.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM reports WHERE id = ?', (report_id,))
+    report = c.fetchone()
+    conn.close()
+    
+    if (report):
+        summary_data = json.loads(report['data'])
+        return render_template_string(html_template, summary_data=summary_data)
+    return "Relatório não encontrado", 404
+
+@app.route('/report/<int:report_id>/delete', methods=['POST'])
+def delete_report(report_id):
+    conn = sqlite3.connect('reports.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM reports WHERE id = ?', (report_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('reports'))
+
 if __name__ == '__main__':
+    init_db()
     app.run(host='0.0.0.0', port=5000, debug=True)

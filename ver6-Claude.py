@@ -153,7 +153,7 @@ html_template = """
 
         .value-highlight {
             font-weight: bold;
-            color: var(--dark-orange);
+            color: var (--dark-orange);
         }
     </style>
 </head>
@@ -242,16 +242,29 @@ html_template = """
 def home():
     return render_template_string(html_template)
 
+def get_first_name(full_name):
+    """
+    Extrai o primeiro nome de um nome completo
+    """
+    if not isinstance(full_name, str):
+        return ""
+    return full_name.split()[0].lower().strip() if full_name.split() else ""
+
+def get_all_name_parts(full_name):
+    """
+    Retorna todas as partes do nome como uma lista
+    """
+    if not isinstance(full_name, str):
+        return []
+    return [part.lower().strip() for part in full_name.split()]
+
 def normalize_technician_name(name):
     """
     Normaliza o nome de um técnico para facilitar a comparação e evitar duplicidades.
     """
     if not isinstance(name, str):
         return ""
-    
-    # Remover espaços extras, converter para minúsculas
-    normalized = name.strip().lower()
-    return normalized
+    return name.strip().lower()
 
 def extract_first_names(technician_str):
     """
@@ -276,28 +289,6 @@ def extract_first_names(technician_str):
     # Remover duplicatas
     return list(dict.fromkeys(names))
 
-def find_matching_technician(tech_name, technician_data):
-    """
-    Procura por um técnico existente que corresponda ao nome fornecido
-    """
-    full_name, first_name = normalize_technician_name(tech_name), tech_name.split()[0].lower()
-    
-    if not first_name:
-        return None
-        
-    # Primeiro procura por correspondência exata
-    if full_name in technician_data:
-        return full_name
-        
-    # Procura por correspondência no primeiro nome ou sobrenome
-    for existing_tech in technician_data.keys():
-        existing_full, existing_first = normalize_technician_name(existing_tech), existing_tech.split()[0].lower()
-        if first_name == existing_first or first_name in existing_full.split():
-            return existing_tech
-            
-    # Se não encontrou, retorna o nome completo original
-    return full_name
-
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
@@ -319,52 +310,73 @@ def upload_file():
     # Remover os tipos de OS "Financeiro" e "Entrega de Carnê"
     df_cleaned = df_cleaned[~df_cleaned['Motivo'].isin(['Financeiro', 'Entrega de Carnê'])]
     
+    # Dicionário para mapear primeiros nomes aos nomes completos
+    name_mapping = {}
+    tech_full_names = set()
+
+    # Primeiro passo: coletar todos os nomes completos dos responsáveis
+    for index, row in df_cleaned.iterrows():
+        if pd.notna(row['Responsável']):
+            full_name = normalize_technician_name(str(row['Responsável']))
+            first_name = get_first_name(full_name)
+            name_parts = get_all_name_parts(full_name)
+            
+            for part in name_parts:
+                name_mapping[part] = full_name
+            tech_full_names.add(full_name)
+
     # Usar um dicionário para armazenar os dados de cada técnico
     technician_data = {}
-    
-    # Lista para rastrear técnicos já contabilizados em cada OS
     processed_techs = set()
-    
+
     # Processar cada linha do DataFrame
     for index, row in df_cleaned.iterrows():
         motivo = row['Motivo'] if pd.notna(row['Motivo']) else "Não especificado"
-        processed_techs.clear()  # Limpar o conjunto para cada nova OS
-        
-        # Processar responsáveis
+        processed_techs.clear()
+
+        # Processar responsável
         if pd.notna(row['Responsável']):
-            # Para responsável principal, mantemos o nome completo
             tech = normalize_technician_name(str(row['Responsável']))
-            matching_tech = find_matching_technician(tech, technician_data)
-            if matching_tech and matching_tech not in processed_techs:
-                if matching_tech not in technician_data:
-                    technician_data[matching_tech] = {
-                        "Técnico": matching_tech,
+            if tech and tech not in processed_techs:
+                if tech not in technician_data:
+                    technician_data[tech] = {
+                        "Técnico": tech,
                         "Quantidade de OS": 0,
                         "Valor Total": 0,
                         "Motivos": Counter()
                     }
-                technician_data[matching_tech]["Quantidade de OS"] += 1
-                technician_data[matching_tech]["Valor Total"] += 3  # Add 3 reais per OS
-                technician_data[matching_tech]["Motivos"][motivo] += 1
-                processed_techs.add(matching_tech)
-        
-        # Processar técnicos auxiliares (apenas primeiro nome)
+                technician_data[tech]["Quantidade de OS"] += 1
+                technician_data[tech]["Valor Total"] += 3
+                technician_data[tech]["Motivos"][motivo] += 1
+                processed_techs.add(tech)
+
+        # Processar técnicos auxiliares
         if pd.notna(row['Técnico(s) auxiliar(s)']):
-            for aux_tech in extract_first_names(str(row['Técnico(s) auxiliar(s)'])):
-                matching_tech = find_matching_technician(aux_tech, technician_data)
-                if matching_tech and matching_tech not in processed_techs:
-                    if matching_tech not in technician_data:
-                        technician_data[matching_tech] = {
-                            "Técnico": matching_tech,
+            aux_techs = extract_first_names(str(row['Técnico(s) auxiliar(s)']))
+            for aux_tech in aux_techs:
+                # Verificar se o primeiro nome corresponde a algum técnico conhecido
+                matched_full_name = name_mapping.get(aux_tech)
+                
+                if matched_full_name and matched_full_name not in processed_techs:
+                    # Usar o nome completo correspondente
+                    tech = matched_full_name
+                elif aux_tech not in processed_techs:
+                    # Usar apenas o primeiro nome se não houver correspondência
+                    tech = aux_tech
+
+                if tech not in processed_techs:
+                    if tech not in technician_data:
+                        technician_data[tech] = {
+                            "Técnico": tech,
                             "Quantidade de OS": 0,
                             "Valor Total": 0,
                             "Motivos": Counter()
                         }
-                    technician_data[matching_tech]["Quantidade de OS"] += 1
-                    technician_data[matching_tech]["Valor Total"] += 3  # Add 3 reais per OS
-                    technician_data[matching_tech]["Motivos"][motivo] += 1
-                    processed_techs.add(matching_tech)
-    
+                    technician_data[tech]["Quantidade de OS"] += 1
+                    technician_data[tech]["Valor Total"] += 3
+                    technician_data[tech]["Motivos"][motivo] += 1
+                    processed_techs.add(tech)
+
     # Verificar se temos dados para processar
     if not technician_data:
         return "Nenhum técnico encontrado nos dados", 400
